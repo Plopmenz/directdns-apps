@@ -66,6 +66,7 @@ impl Platform for AndroidPlatform {
         }
 
         let app = self.app.clone();
+        let call_app = app.clone();
         let pending = self.pending.clone();
         let (method, signature) = if self.status().running {
             ("stopVpn", "(Landroid/content/Context;)V")
@@ -75,7 +76,11 @@ impl Platform for AndroidPlatform {
         };
 
         schedule_on_java_main(&app, move || {
-            let result = call_platform(method, signature);
+            let result = if method == "requestStart" {
+                call_platform_activity(&call_app, method, signature)
+            } else {
+                call_platform(method, signature)
+            };
             pending.store(false, Ordering::SeqCst);
             if let Err(error) = result {
                 push_error(error);
@@ -235,6 +240,14 @@ fn android_context<'local>() -> JObject<'local> {
     unsafe { JObject::from_raw(ptr) }
 }
 
+/// `ndk_context` exposes the Application context; permission and activity-result
+/// APIs need the real NativeActivity instance instead.
+#[cfg(target_os = "android")]
+fn android_activity<'local>(app: &AndroidApp) -> JObject<'local> {
+    let ptr = app.activity_as_ptr() as jobject;
+    unsafe { JObject::from_raw(ptr) }
+}
+
 /// `FindClass` from the NativeActivity thread only sees the system class loader.
 /// Loading through the app `Context` class loader makes our Kotlin classes visible.
 #[cfg(target_os = "android")]
@@ -267,6 +280,17 @@ fn call_platform(method: &str, signature: &str) -> Result<(), String> {
         let class = find_platform_class(env)?;
         let context = android_context();
         env.call_static_method(class, method, signature, &[JValue::Object(&context)])
+            .map_err(|error| format!("{method} failed: {error}"))?;
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "android")]
+fn call_platform_activity(app: &AndroidApp, method: &str, signature: &str) -> Result<(), String> {
+    with_env(|env| {
+        let class = find_platform_class(env)?;
+        let activity = android_activity(app);
+        env.call_static_method(class, method, signature, &[JValue::Object(&activity)])
             .map_err(|error| format!("{method} failed: {error}"))?;
         Ok(())
     })
