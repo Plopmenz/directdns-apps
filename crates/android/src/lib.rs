@@ -4,6 +4,8 @@
 //! Android APIs Rust cannot use portably: VPN service, permissions, clipboard,
 //! and the app files directory.
 
+#[cfg(target_os = "android")]
+use std::path::Path;
 use std::sync::Mutex;
 
 #[cfg(target_os = "android")]
@@ -27,6 +29,8 @@ use ygg_core::{InterfaceSource, Session, Status};
 
 #[cfg(target_os = "android")]
 const PLATFORM_CLASS: &str = "com.plopmenz.directdns.YggPlatform";
+#[cfg(target_os = "android")]
+const SEED_FILE: &str = "seed.key";
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -37,8 +41,8 @@ struct AndroidPlatform;
 #[cfg(target_os = "android")]
 impl Platform for AndroidPlatform {
     fn initialize(&mut self) -> Result<String, String> {
-        let path = java_files_dir()?;
-        let seed = ygg_core::load_or_create_seed(path)
+        let seed_path = Path::new(&java_files_dir()?).join(SEED_FILE);
+        let seed = ygg_core::load_or_create_seed(seed_path)
             .map_err(|error| format!("Cannot load key: {error}"))?;
         Ok(ygg_core::address_from_seed(&seed))
     }
@@ -48,12 +52,12 @@ impl Platform for AndroidPlatform {
     }
 
     fn toggle(&mut self) -> Result<(), String> {
-        let method = if self.status().running {
-            "stopVpn"
+        if self.status().running {
+            call_platform("stopVpn", "(Landroid/content/Context;)V")
         } else {
-            "requestStart"
-        };
-        call_platform(method, "(Landroid/content/Context;)V")
+            // Kotlin declares requestStart(Activity), not requestStart(Context).
+            call_platform("requestStart", "(Landroid/app/Activity;)V")
+        }
     }
 
     fn copy_text(&mut self, _ctx: &egui::Context, text: &str) -> Result<(), String> {
