@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/ygg-core", "crates/app-ui", "crates/android"]
+members = [
+    "crates/ygg-core",
+    "crates/app-core",
+    "crates/linux",
+    "crates/android",
+]
 
 [workspace.package]
 version = "1.0.0"

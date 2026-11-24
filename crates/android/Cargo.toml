@@ -10,6 +10,18 @@ name = "directdns_android"
 crate-type = ["cdylib"]
 
 [dependencies]
+app-core = { path = "../app-core" }
 ygg-core.workspace = true
 jni = "0.21.1"
 log = "0.4"
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", default-features = false, features = [
+    "native-activity",
+] }
+ndk-context = "0.1"
+eframe = { version = "0.37.0", default-features = false, features = [
+    "android-native-activity",
+    "default_fonts",
+    "glow",
+] }

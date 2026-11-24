@@ -149,20 +149,20 @@
             cargoLock.lockFile = ./Cargo.lock;
             cargoBuildFlags = [
               "-p"
-              "app-ui"
+              "linux-bridge"
             ];
             nativeBuildInputs = [ pkgs.makeWrapper ];
             doCheck = false;
 
             postInstall = ''
-              wrapProgram $out/bin/app-ui \
+              wrapProgram $out/bin/linux-bridge \
                 --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath guiRuntimeLibs} \
                 --set-default VK_DRIVER_FILES ${pkgs.mesa}/share/vulkan/icd.d
-              ln -s app-ui $out/bin/directdns
+              ln -s linux-bridge $out/bin/directdns
             '';
 
             meta = {
-              description = "DirectDNS desktop UI with a Yggdrasil peer VPN";
+              description = "DirectDNS Linux UI with a Yggdrasil peer VPN";
               mainProgram = "directdns";
               platforms = [
                 "x86_64-linux"
@@ -242,10 +242,12 @@
               ANDROID_JAR="$SDK/platforms/android-36/android.jar"
               KOTLIN="${pkgs.kotlin}"
 
-              mkdir -p build/res-compiled build/gen build/classes-java build/dex build/apkroot/lib build/apk
-              cp -r platforms/android/app/src/main/AndroidManifest.xml \
-                platforms/android/app/src/main/res \
-                platforms/android/app/src/main/java build/
+              mkdir -p build/res build/res-compiled build/gen build/classes-java build/dex build/apkroot/lib build/apk
+              cp platforms/android/app/src/main/AndroidManifest.xml build/
+              cp -r platforms/android/app/src/main/java build/
+              if [ -d platforms/android/app/src/main/res ]; then
+                cp -r platforms/android/app/src/main/res/. build/res/
+              fi
               cp -r ${androidNative}/jniLibs/arm64-v8a build/apkroot/lib/
               cp -r ${androidNative}/jniLibs/armeabi-v7a build/apkroot/lib/
 
@@ -365,11 +367,13 @@
               UPLOAD_PASS=$(cat "$KEY_DIR/upload-password.txt")
               KEY_ALIAS=$(cat "$KEY_DIR/key-alias.txt")
 
-              mkdir -p build/res-compiled build/gen build/classes-java build/dex \
+              mkdir -p build/res build/res-compiled build/gen build/classes-java build/dex \
                 build/aapt-out build/module/manifest build/module/dex build/module/lib build/aab
-              cp -r platforms/android/app/src/main/AndroidManifest.xml \
-                platforms/android/app/src/main/res \
-                platforms/android/app/src/main/java build/
+              cp platforms/android/app/src/main/AndroidManifest.xml build/
+              cp -r platforms/android/app/src/main/java build/
+              if [ -d platforms/android/app/src/main/res ]; then
+                cp -r platforms/android/app/src/main/res/. build/res/
+              fi
 
               "$BT/aapt2" compile --dir build/res -o build/res-compiled/res.zip
               "$BT/aapt2" link \
@@ -403,7 +407,10 @@
               unzip -q build/base-resources.zip -d build/aapt-out
               cp build/aapt-out/AndroidManifest.xml build/module/manifest/AndroidManifest.xml
               cp build/aapt-out/resources.pb build/module/resources.pb
-              cp -r build/aapt-out/res build/module/res
+              mkdir -p build/module/res
+              if [ -d build/aapt-out/res ]; then
+                cp -r build/aapt-out/res/. build/module/res/
+              fi
               cp build/dex/classes*.dex build/module/dex/
               cp -r ${androidNative}/jniLibs/arm64-v8a build/module/lib/
               cp -r ${androidNative}/jniLibs/armeabi-v7a build/module/lib/

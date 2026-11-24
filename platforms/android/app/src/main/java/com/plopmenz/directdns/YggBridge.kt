@@ -1,23 +1,26 @@
 package com.plopmenz.directdns
 
-import android.util.Log
-
-/** JNI entry points implemented in crates/android. */
+/** Declarations for JNI calls into the shared Rust core. */
 object YggBridge {
-    private const val TAG = "DirectDNS"
-
     init {
-        Log.d(TAG, "Loading libdirectdns_android.so")
         System.loadLibrary("directdns_android")
-        Log.d(TAG, "Loaded libdirectdns_android.so")
     }
 
-    external fun loadOrCreateSeed(path: String): ByteArray
-    external fun deriveAddress(seed: ByteArray): String
-    external fun dnsServers(): Array<String>
+    @JvmStatic external fun loadOrCreateSeed(path: String): ByteArray
 
-    /** Takes ownership of the TUN file descriptor. */
-    external fun start(seed: ByteArray, tunFd: Int)
-    external fun stop()
-    external fun status(): String
+    @JvmStatic external fun deriveAddress(seed: ByteArray): String
+
+    @JvmStatic external fun dnsServers(): Array<String>
+
+    @JvmStatic external fun start(seed: ByteArray, tunFd: Int)
+
+    @JvmStatic external fun stop()
+
+    @JvmStatic external fun status(): String
+
+    @JvmStatic external fun onError(message: String)
+
+    @JvmStatic external fun onNotificationPermissionResult(granted: Boolean)
+
+    @JvmStatic external fun onVpnPermissionResult(granted: Boolean)
 }

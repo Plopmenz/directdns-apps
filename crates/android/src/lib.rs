@@ -1,16 +1,280 @@
-//! JNI bridge between Kotlin's `VpnService` and the Rust Yggdrasil session.
+//! Android native entry point and minimal platform glue.
 //!
-//! Kotlin loads/creates the seed, derives the address from it, configures the
-//! VPN interface (including DNS servers), then hands the TUN fd to `start`.
+//! The UI itself is rendered by `app-core` with egui. Kotlin only exposes
+//! Android APIs Rust cannot use portably: VPN service, permissions, clipboard,
+//! and the app files directory.
 
 use std::sync::Mutex;
 
+#[cfg(target_os = "android")]
+use android_activity::AndroidApp;
+#[cfg(target_os = "android")]
+use app_core::{App, Platform};
+#[cfg(target_os = "android")]
+use eframe::egui;
 use jni::JNIEnv;
+#[cfg(target_os = "android")]
+use jni::JavaVM;
+#[cfg(target_os = "android")]
+use jni::objects::JValue;
 use jni::objects::{JByteArray, JClass, JObject, JString};
+#[cfg(target_os = "android")]
+use jni::sys::jboolean;
+#[cfg(target_os = "android")]
+use jni::sys::jobject;
 use jni::sys::{jint, jobjectArray, jsize, jstring};
 use ygg_core::{InterfaceSource, Session, Status};
 
+#[cfg(target_os = "android")]
+const PLATFORM_CLASS: &str = "com/plopmenz/directdns/YggPlatform";
+
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
+static ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(target_os = "android")]
+struct AndroidPlatform;
+
+#[cfg(target_os = "android")]
+impl Platform for AndroidPlatform {
+    fn initialize(&mut self) -> Result<String, String> {
+        let path = java_files_dir()?;
+        let seed = ygg_core::load_or_create_seed(path)
+            .map_err(|error| format!("Cannot load key: {error}"))?;
+        Ok(ygg_core::address_from_seed(&seed))
+    }
+
+    fn status(&self) -> Status {
+        session_status()
+    }
+
+    fn toggle(&mut self) -> Result<(), String> {
+        let method = if self.status().running {
+            "stopVpn"
+        } else {
+            "requestStart"
+        };
+        call_platform(method, "(Landroid/content/Context;)V")
+    }
+
+    fn copy_text(&mut self, _ctx: &egui::Context, text: &str) -> Result<(), String> {
+        call_platform_string(
+            "copyToClipboard",
+            "(Landroid/content/Context;Ljava/lang/String;)V",
+            text,
+        )
+    }
+
+    fn take_errors(&mut self) -> Vec<String> {
+        match ERRORS.lock() {
+            Ok(mut errors) => errors.drain(..).collect(),
+            Err(poisoned) => poisoned.into_inner().drain(..).collect(),
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+struct Runner {
+    app: App<AndroidPlatform>,
+}
+
+#[cfg(target_os = "android")]
+impl eframe::App for Runner {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.app.logic(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.app.ui(ui);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+fn android_main(app: AndroidApp) {
+    let runner = Runner {
+        app: App::new(AndroidPlatform),
+    };
+    let options = eframe::NativeOptions {
+        android_app: Some(app),
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
+    };
+    let _ = eframe::run_native(
+        "DirectDNS",
+        options,
+        Box::new(move |_ctx| Ok(Box::new(runner) as Box<dyn eframe::App>)),
+    );
+}
+
+fn session_status() -> Status {
+    let session = match SESSION.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    session
+        .as_ref()
+        .map(Session::status)
+        .unwrap_or_else(Status::default)
+}
+
+fn push_error(message: impl Into<String>) {
+    let message = message.into();
+    log::error!("{message}");
+    match ERRORS.lock() {
+        Ok(mut errors) => errors.push(message),
+        Err(poisoned) => poisoned.into_inner().push(message),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn java_vm() -> Result<JavaVM, String> {
+    let ptr = ndk_context::android_context().vm() as *mut jni::sys::JavaVM;
+    if ptr.is_null() {
+        return Err("Java VM is unavailable".into());
+    }
+    unsafe { JavaVM::from_raw(ptr) }.map_err(|error| format!("Java VM is unavailable: {error}"))
+}
+
+#[cfg(target_os = "android")]
+fn with_env<R>(action: impl FnOnce(&mut JNIEnv<'_>) -> Result<R, String>) -> Result<R, String> {
+    let vm = java_vm()?;
+    let mut env = match vm.get_env() {
+        Ok(env) => env,
+        Err(_) => vm
+            .attach_current_thread_permanently()
+            .map_err(|error| format!("cannot attach JNI thread: {error}"))?,
+    };
+    let result = action(&mut env)?;
+    check_exception(&mut env)?;
+    Ok(result)
+}
+
+#[cfg(target_os = "android")]
+fn check_exception(env: &mut JNIEnv<'_>) -> Result<(), String> {
+    if env
+        .exception_check()
+        .map_err(|error| format!("cannot check Java exception: {error}"))?
+    {
+        let _ = env.exception_describe();
+        let _ = env.exception_clear();
+        return Err("Java call failed".into());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "android")]
+fn android_context<'local>() -> JObject<'local> {
+    let ptr = ndk_context::android_context().context() as jobject;
+    unsafe { JObject::from_raw(ptr) }
+}
+
+#[cfg(target_os = "android")]
+fn call_platform(method: &str, signature: &str) -> Result<(), String> {
+    with_env(|env| {
+        let class = env
+            .find_class(PLATFORM_CLASS)
+            .map_err(|error| format!("cannot find {PLATFORM_CLASS}: {error}"))?;
+        let context = android_context();
+        env.call_static_method(class, method, signature, &[JValue::Object(&context)])
+            .map_err(|error| format!("{method} failed: {error}"))?;
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "android")]
+fn call_platform_string(method: &str, signature: &str, value: &str) -> Result<(), String> {
+    with_env(|env| {
+        let class = env
+            .find_class(PLATFORM_CLASS)
+            .map_err(|error| format!("cannot find {PLATFORM_CLASS}: {error}"))?;
+        let context = android_context();
+        let value = JObject::from(
+            env.new_string(value)
+                .map_err(|error| format!("cannot allocate Java string: {error}"))?,
+        );
+        env.call_static_method(
+            class,
+            method,
+            signature,
+            &[JValue::Object(&context), JValue::Object(&value)],
+        )
+        .map_err(|error| format!("{method} failed: {error}"))?;
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "android")]
+fn java_files_dir() -> Result<String, String> {
+    with_env(|env| {
+        let class = env
+            .find_class(PLATFORM_CLASS)
+            .map_err(|error| format!("cannot find {PLATFORM_CLASS}: {error}"))?;
+        let context = android_context();
+        let value = env
+            .call_static_method(
+                class,
+                "filesDir",
+                "(Landroid/content/Context;)Ljava/lang/String;",
+                &[JValue::Object(&context)],
+            )
+            .map_err(|error| format!("filesDir failed: {error}"))?
+            .l()
+            .map_err(|error| format!("filesDir returned a non-string: {error}"))?;
+        Ok(env
+            .get_string(&JString::from(value))
+            .map_err(|error| format!("cannot read filesDir: {error}"))?
+            .into())
+    })
+}
+
+// --- JNI methods called by Kotlin -------------------------------------------------
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_onError<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    message: JString<'local>,
+) {
+    let message = env
+        .get_string(&message)
+        .map(String::from)
+        .unwrap_or_else(|_| "Unknown Android error".into());
+    push_error(message);
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_onNotificationPermissionResult<
+    'local,
+>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    granted: jboolean,
+) {
+    if granted == 0 {
+        push_error("Notifications permission is required to run the VPN");
+        return;
+    }
+    if let Err(error) = call_platform("startVpn", "(Landroid/content/Context;)V") {
+        push_error(error);
+    }
+}
+
+#[cfg(target_os = "android")]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_onVpnPermissionResult<'local>(
+    _env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    granted: jboolean,
+) {
+    if granted == 0 {
+        push_error("VPN permission was not granted");
+        return;
+    }
+    if let Err(error) = call_platform("startVpn", "(Landroid/content/Context;)V") {
+        push_error(error);
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_loadOrCreateSeed<'local>(
@@ -144,15 +408,7 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_status<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {
-    let session = match SESSION.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    let status = session
-        .as_ref()
-        .map(Session::status)
-        .unwrap_or_else(Status::default);
-    string_to_java(&mut env, status.to_json())
+    string_to_java(&mut env, session_status().to_json())
 }
 
 fn java_seed(env: &JNIEnv<'_>, array: &JByteArray<'_>) -> Result<[u8; 32], String> {

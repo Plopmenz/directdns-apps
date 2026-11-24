@@ -184,8 +184,12 @@ dependencies = [
 name = "android-bridge"
 version = "1.0.0"
 dependencies = [
+ "android-activity",
+ "app-core",
+ "eframe",
  "jni 0.21.1",
  "log",
+ "ndk-context",
  "ygg-core",
 ]
 
@@ -255,14 +259,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "app-ui"
+name = "app-core"
 version = "1.0.0"
 dependencies = [
- "dirs",
- "eframe",
- "env_logger",
- "log",
- "tokio",
+ "egui",
  "ygg-core",
 ]
 
@@ -1151,6 +1151,7 @@ dependencies = [
  "egui-winit",
  "egui_glow",
  "egui_system_font_provider",
+ "glow",
  "glutin",
  "glutin-winit",
  "image",
@@ -2298,6 +2299,19 @@ name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
+
+[[package]]
+name = "linux-bridge"
+version = "1.0.0"
+dependencies = [
+ "app-core",
+ "dirs",
+ "eframe",
+ "env_logger",
+ "log",
+ "tokio",
+ "ygg-core",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -5743,6 +5757,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "yggdrasil-mesh",
 ]

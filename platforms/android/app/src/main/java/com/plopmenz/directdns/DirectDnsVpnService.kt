@@ -34,7 +34,7 @@ class DirectDnsVpnService : VpnService() {
                 try {
                     startVpn()
                 } catch (error: Throwable) {
-                    Log.e(TAG, "VPN start failed", error)
+                    reportError("Cannot start VPN: ${error.message ?: error}", error)
                     stopSelf()
                 }
             }
@@ -43,14 +43,19 @@ class DirectDnsVpnService : VpnService() {
                 try {
                     YggBridge.stop()
                 } catch (error: Throwable) {
-                    Log.e(TAG, "VPN stop failed", error)
+                    reportError("Cannot stop VPN: ${error.message ?: error}", error)
                 }
                 stopSelf()
             }
 
-            else -> Log.w(TAG, "Unknown VPN service action: ${intent?.action}")
+            else -> reportError("Unknown VPN service action: ${intent?.action}")
         }
         return START_NOT_STICKY
+    }
+
+    private fun reportError(message: String, error: Throwable? = null) {
+        if (error == null) Log.e(TAG, message) else Log.e(TAG, message, error)
+        YggBridge.onError(message)
     }
 
     private fun startVpn() {
@@ -76,12 +81,11 @@ class DirectDnsVpnService : VpnService() {
             builder.addDnsServer(server)
         }
 
-        val tunnel: ParcelFileDescriptor = builder.establish()
-            ?: run {
-                Log.e(TAG, "VpnService.establish() returned null")
-                stopSelf()
-                return
-            }
+        val tunnel: ParcelFileDescriptor = builder.establish() ?: run {
+            reportError("Could not create VPN tunnel")
+            stopSelf()
+            return
+        }
 
         // Ownership of the raw fd moves into tun-rs; do not close the ParcelFileDescriptor.
         val tunFd = tunnel.detachFd()
@@ -106,7 +110,7 @@ class DirectDnsVpnService : VpnService() {
         try {
             YggBridge.stop()
         } catch (error: Throwable) {
-            Log.e(TAG, "VPN cleanup failed", error)
+            reportError("VPN cleanup failed: ${error.message ?: error}", error)
         }
         super.onDestroy()
     }

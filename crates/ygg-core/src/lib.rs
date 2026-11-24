@@ -2,7 +2,8 @@
 //!
 //! Responsibilities:
 //! - generate and persist the node seed,
-//! - resolve the hardcoded public peers and use their IPs as DNS servers,
+//! - resolve the hardcoded public peers, probe every address, and use the
+//!   lowest-RTT one as the TLS peer while keeping all IPs as DNS servers,
 //! - run the node with a split `200::/7` route on Linux or a supplied TUN fd on
 //!   mobile,
 //! - expose a small synchronous [`Session`] API to the UI and JNI layers.

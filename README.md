@@ -1,33 +1,40 @@
 # DirectDNS
 
-A small Yggdrasil peer VPN app with a big on/off switch. Rust core and native
-egui UI on desktop; Android uses a Kotlin `VpnService` shell around the same
-Rust core via JNI. No webview.
+A small Yggdrasil peer VPN app with a big on/off switch. The Rust core and all
+visible UI are shared: desktop runs the egui app directly, while Android hosts
+the same egui UI in a native activity. Kotlin is limited to Android-only APIs
+such as `VpnService`, permissions, clipboard, and file paths. No webview.
 
 ## Design
 
 - **Core:** `yggdrasil-mesh` 0.1 (`yggdrasil-rs`), pinned in `Cargo.lock` and
   isolated behind `crates/ygg-core` so it can be swapped for `yggdrasil-go` +
   gomobile if the spike fails.
-- **UI:** `eframe`/`egui` 0.37 (`MIT OR Apache-2.0`) on Linux/desktop.
+- **UI:** `eframe`/`egui` 0.37 (`MIT OR Apache-2.0`) on both platforms. The
+  shared `crates/app-core` crate owns the layout, colors, copy feedback, and
+  in-app error notices.
 - **Peers:** `peer.yggdrasil.openmesh.cloud` is resolved over the normal
-  network. Every resolved A/AAAA record becomes a `tls://<ip>:9003` peer. No
-  SNI is needed because the peers accept raw-IP TLS.
+  network. Every resolved A/AAAA record is ICMP-probed (with a TCP connect
+  fallback), and only the lowest-RTT address becomes the `tls://<ip>:9003`
+  peer. No SNI is needed because the peer accepts raw-IP TLS.
 - **DNS:** the same resolved IPs are set as plain DNS servers on port 53, for
   all domains. Requests leave via the normal network, not through Yggdrasil.
 - **Routing:** split tunnel. Only `200::/7` is routed through the Yggdrasil
   interface; everything else keeps the existing default route.
 - **Key:** a 32-byte seed is generated on first start and stored as
   `seed.key` (mode `0600` on Unix) in the platform data directory. The derived
-  address is shown as `ip:<addr>` and copied to the clipboard on click.
+  address is shown below the toggle as `ip:<addr>`. Clicking it copies that text
+  and shows a brief in-app notice; the chip brightens on hover. Errors also show
+  directly in the app instead of being log-only.
 
 ## Layout
 
 ```
 crates/ygg-core/    seed, peer resolution, node/TUN lifecycle, routing, Session API
-crates/app-ui/      eframe desktop UI
-crates/android/     JNI cdylib
-platforms/android/  Gradle project, VpnService and minimal native Activity
+crates/app-core/    shared egui UI, toggle state, colors, notices, errors
+crates/linux/       Linux eframe runner
+crates/android/     Android native activity, JNI cdylib, platform glue
+platforms/android/  Gradle project, VpnService and minimal native Activity shell
 scripts/            build helpers
 ```
 
@@ -37,6 +44,12 @@ The flake builds the Linux binary, the Android JNI libraries, a debug-signed
 APK, and a signed Android App Bundle for Google Play. It pins the Android SDK to
 API 36, build-tools 36.0.0 and NDK 27c, and uses `rust-overlay` so the Android
 Rust std targets are available.
+
+Because flake sources come from Git, stage new files before building:
+
+```sh
+git add -A
+```
 
 ```sh
 nix build .#linux          # $out/bin/directdns
@@ -99,12 +112,14 @@ TUN creation and route/DNS changes need root. `resolvectl` (systemd-resolved)
 and `ip` must be installed.
 
 ```sh
-cargo build -p app-ui --release
-sudo RUST_LOG=info target/release/app-ui
+cargo build -p linux-bridge --release
+sudo RUST_LOG=info target/release/linux-bridge
 ```
 
-Turn on with the big button. The address chip copies `ip:<addr>`. On shutdown,
-or when turning off, the `200::/7` route and DNS override are reverted.
+Use the toggle to turn the tunnel on or off. The derived `ip:<addr>` is shown
+below the button. The background is red while off, orange while connecting, and
+green while connected. On shutdown or when turning off, the `200::/7` route and
+DNS override are reverted.
 
 To sanity-check the split tunnel while connected:
 
@@ -132,17 +147,16 @@ nix develop   # optional local Gradle/JDK tooling
 The Gradle files remain available for optional local development, for example
 `gradle -p platforms/android assembleDebug` inside `nix develop`.
 
-The Kotlin shell:
+Kotlin is only platform glue:
 
-1. asks `YggBridge` for the persistent seed and derived address,
-2. asks for the resolved DNS servers,
-3. builds a `VpnService` with `addAddress(address, 128)`,
+1. exposes the app files directory, clipboard, and permission helpers,
+2. builds a `VpnService` with `addAddress(address, 128)`,
    `addRoute("200::", 7)`, and `addDnsServer(...)` for each peer IP,
-4. calls `establish()`, detaches the TUN fd and hands it to Rust,
-5. polls `YggBridge.status()` for the peers-up indicator.
+3. calls `establish()`, detaches the TUN fd and hands it to Rust,
+4. forwards permission/activity results and service errors into Rust.
 
-The Activity is intentionally minimal native Android UI. It can later be
-replaced by an `eframe` Android activity without changing the Rust core.
+The visible UI is rendered by `app-core` through `eframe`'s Android native
+activity support. The Activity itself contains no layout or app-specific UI.
 
 There is no custom launcher icon yet: `android:icon` is unset, so Android uses
 its default launcher icon. The foreground notification small icon is Android's
@@ -158,9 +172,9 @@ cargo run -p ygg-core --example check   # connects to peers without needing root
 ```
 
 The `check` example starts the core with the TUN disabled and prints peer status
-until a link comes up. It verified 2/4 peers up against the live public peers.
-`ygg-core` also includes a live lookup test for the hardcoded peer host and a
-test that maps resolved peer IPs one-to-one to DNS servers.
+until a link comes up. `ygg-core` also includes a live lookup test that verifies
+the hardcoded peer host resolves and the fastest address becomes the single TLS
+peer.
 
 ## Current limitations
 
