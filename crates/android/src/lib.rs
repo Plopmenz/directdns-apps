@@ -6,7 +6,11 @@
 
 #[cfg(target_os = "android")]
 use std::path::Path;
+#[cfg(target_os = "android")]
+use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(target_os = "android")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(target_os = "android")]
 use android_activity::AndroidApp;
@@ -38,6 +42,7 @@ static ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 #[cfg(target_os = "android")]
 struct AndroidPlatform {
     app: AndroidApp,
+    pending: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "android")]
@@ -56,21 +61,26 @@ impl Platform for AndroidPlatform {
     }
 
     fn toggle(&mut self) -> Result<(), String> {
+        if self.pending.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+
         let app = self.app.clone();
-        if self.status().running {
-            schedule_on_java_main(&app, || {
-                if let Err(error) = call_platform("stopVpn", "(Landroid/content/Context;)V") {
-                    push_error(format!("stopVpn failed: {error}"));
-                }
-            });
+        let pending = self.pending.clone();
+        let (method, signature) = if self.status().running {
+            ("stopVpn", "(Landroid/content/Context;)V")
         } else {
             // Kotlin declares requestStart(Activity), not requestStart(Context).
-            schedule_on_java_main(&app, || {
-                if let Err(error) = call_platform("requestStart", "(Landroid/app/Activity;)V") {
-                    push_error(format!("requestStart failed: {error}"));
-                }
-            });
-        }
+            ("requestStart", "(Landroid/app/Activity;)V")
+        };
+
+        schedule_on_java_main(&app, move || {
+            let result = call_platform(method, signature);
+            pending.store(false, Ordering::SeqCst);
+            if let Err(error) = result {
+                push_error(error);
+            }
+        });
         Ok(())
     }
 
@@ -83,7 +93,7 @@ impl Platform for AndroidPlatform {
                 "(Landroid/content/Context;Ljava/lang/String;)V",
                 &value,
             ) {
-                push_error(format!("copyToClipboard failed: {error}"));
+                push_error(error);
             }
         });
         Ok(())
@@ -116,8 +126,12 @@ impl eframe::App for Runner {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
+    let pending = Arc::new(AtomicBool::new(false));
     let runner = Runner {
-        app: App::new(AndroidPlatform { app: app.clone() }),
+        app: App::new(AndroidPlatform {
+            app: app.clone(),
+            pending,
+        }),
     };
     let options = eframe::NativeOptions {
         android_app: Some(app),
@@ -176,7 +190,10 @@ fn with_env<R>(action: impl FnOnce(&mut JNIEnv<'_>) -> Result<R, String>) -> Res
             exception?;
             Ok(value)
         }
-        Err(error) => Err(error),
+        Err(error) => match exception {
+            Ok(()) => Err(error),
+            Err(detail) => Err(format!("{error}; {detail}")),
+        },
     }
 }
 
