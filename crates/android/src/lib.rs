@@ -7,8 +7,6 @@
 #[cfg(target_os = "android")]
 use std::path::Path;
 use std::sync::Mutex;
-#[cfg(target_os = "android")]
-use std::sync::mpsc;
 
 #[cfg(target_os = "android")]
 use android_activity::AndroidApp;
@@ -45,7 +43,9 @@ struct AndroidPlatform {
 #[cfg(target_os = "android")]
 impl Platform for AndroidPlatform {
     fn initialize(&mut self) -> Result<String, String> {
-        let seed_path = Path::new(&java_files_dir_on_main(&self.app)?).join(SEED_FILE);
+        // This runs before NativeActivity's Java main thread is fully available.
+        // `filesDir` is safe from the native thread, so do not block on the looper.
+        let seed_path = Path::new(&java_files_dir()?).join(SEED_FILE);
         let seed = ygg_core::load_or_create_seed(seed_path)
             .map_err(|error| format!("Cannot load key: {error}"))?;
         Ok(ygg_core::address_from_seed(&seed))
@@ -56,21 +56,37 @@ impl Platform for AndroidPlatform {
     }
 
     fn toggle(&mut self) -> Result<(), String> {
+        let app = self.app.clone();
         if self.status().running {
-            call_platform_on_main(&self.app, "stopVpn", "(Landroid/content/Context;)V")
+            schedule_on_java_main(&app, || {
+                if let Err(error) = call_platform("stopVpn", "(Landroid/content/Context;)V") {
+                    push_error(format!("stopVpn failed: {error}"));
+                }
+            });
         } else {
             // Kotlin declares requestStart(Activity), not requestStart(Context).
-            call_platform_on_main(&self.app, "requestStart", "(Landroid/app/Activity;)V")
+            schedule_on_java_main(&app, || {
+                if let Err(error) = call_platform("requestStart", "(Landroid/app/Activity;)V") {
+                    push_error(format!("requestStart failed: {error}"));
+                }
+            });
         }
+        Ok(())
     }
 
     fn copy_text(&mut self, _ctx: &egui::Context, text: &str) -> Result<(), String> {
-        call_platform_string_on_main(
-            &self.app,
-            "copyToClipboard",
-            "(Landroid/content/Context;Ljava/lang/String;)V",
-            text,
-        )
+        let app = self.app.clone();
+        let value = text.to_string();
+        schedule_on_java_main(&app, move || {
+            if let Err(error) = call_platform_string(
+                "copyToClipboard",
+                "(Landroid/content/Context;Ljava/lang/String;)V",
+                &value,
+            ) {
+                push_error(format!("copyToClipboard failed: {error}"));
+            }
+        });
+        Ok(())
     }
 
     fn take_errors(&mut self) -> Vec<String> {
@@ -281,49 +297,11 @@ fn java_files_dir() -> Result<String, String> {
     })
 }
 
-/// Runs a JNI helper on Android's main thread and waits for its result.
+/// Schedules an Android API call on the Java main thread without blocking Rust.
+/// Failures are routed into the shared UI error queue.
 #[cfg(target_os = "android")]
-fn run_on_java_main<R>(
-    app: &AndroidApp,
-    action: impl FnOnce() -> Result<R, String> + Send + 'static,
-) -> Result<R, String>
-where
-    R: Send + 'static,
-{
-    let (sender, receiver) = mpsc::channel();
-    app.run_on_java_main_thread(Box::new(move || {
-        let _ = sender.send(action());
-    }));
-    receiver
-        .recv()
-        .map_err(|_| "Android main thread is unavailable".to_string())?
-}
-
-#[cfg(target_os = "android")]
-fn call_platform_on_main(app: &AndroidApp, method: &str, signature: &str) -> Result<(), String> {
-    let method = method.to_string();
-    let signature = signature.to_string();
-    run_on_java_main(app, move || call_platform(&method, &signature))
-}
-
-#[cfg(target_os = "android")]
-fn call_platform_string_on_main(
-    app: &AndroidApp,
-    method: &str,
-    signature: &str,
-    value: &str,
-) -> Result<(), String> {
-    let method = method.to_string();
-    let signature = signature.to_string();
-    let value = value.to_string();
-    run_on_java_main(app, move || {
-        call_platform_string(&method, &signature, &value)
-    })
-}
-
-#[cfg(target_os = "android")]
-fn java_files_dir_on_main(app: &AndroidApp) -> Result<String, String> {
-    run_on_java_main(app, java_files_dir)
+fn schedule_on_java_main(app: &AndroidApp, action: impl FnOnce() + Send + 'static) {
+    app.run_on_java_main_thread(Box::new(action));
 }
 
 // --- JNI methods called by Kotlin -------------------------------------------------
