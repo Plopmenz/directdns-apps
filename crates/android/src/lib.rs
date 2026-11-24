@@ -13,7 +13,7 @@ use ygg_core::{InterfaceSource, Session, Status};
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_directdns_app_YggBridge_loadOrCreateSeed<'local>(
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_loadOrCreateSeed<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     path: JString<'local>,
@@ -41,7 +41,7 @@ pub extern "system" fn Java_dev_directdns_app_YggBridge_loadOrCreateSeed<'local>
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_directdns_app_YggBridge_deriveAddress<'local>(
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_deriveAddress<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     seed: JByteArray<'local>,
@@ -57,7 +57,7 @@ pub extern "system" fn Java_dev_directdns_app_YggBridge_deriveAddress<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_directdns_app_YggBridge_dnsServers<'local>(
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_dnsServers<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jobjectArray {
@@ -96,7 +96,7 @@ pub extern "system" fn Java_dev_directdns_app_YggBridge_dnsServers<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_directdns_app_YggBridge_start<'local>(
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_start<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
     seed: JByteArray<'local>,
@@ -124,7 +124,7 @@ pub extern "system" fn Java_dev_directdns_app_YggBridge_start<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_directdns_app_YggBridge_stop<'local>(
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_stop<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) {
@@ -140,7 +140,7 @@ pub extern "system" fn Java_dev_directdns_app_YggBridge_stop<'local>(
 }
 
 #[unsafe(no_mangle)]
-pub extern "system" fn Java_dev_directdns_app_YggBridge_status<'local>(
+pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_status<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jstring {

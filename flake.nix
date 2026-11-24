@@ -122,6 +122,26 @@
             rustc = rust;
           };
 
+          # winit/wgpu load window-system and Vulkan libraries with dlopen at
+          # runtime, so they are absent from ldd. Keep them in the wrapper.
+          guiRuntimeLibs = with pkgs; [
+            libx11
+            libxcursor
+            libxi
+            libxrandr
+            libxext
+            libxrender
+            libxfixes
+            libxinerama
+            libxxf86vm
+            libxcb
+            libxkbcommon
+            wayland
+            mesa
+            libgbm
+            vulkan-loader
+          ];
+
           linux = rustPlatform.buildRustPackage {
             pname = "directdns";
             inherit version;
@@ -131,9 +151,13 @@
               "-p"
               "app-ui"
             ];
+            nativeBuildInputs = [ pkgs.makeWrapper ];
             doCheck = false;
 
             postInstall = ''
+              wrapProgram $out/bin/app-ui \
+                --prefix LD_LIBRARY_PATH : ${lib.makeLibraryPath guiRuntimeLibs} \
+                --set-default VK_DRIVER_FILES ${pkgs.mesa}/share/vulkan/icd.d
               ln -s app-ui $out/bin/directdns
             '';
 

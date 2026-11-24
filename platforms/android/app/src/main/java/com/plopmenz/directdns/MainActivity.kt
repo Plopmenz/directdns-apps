@@ -42,7 +42,7 @@ class MainActivity : Activity() {
                 } else {
                     "Off"
                 }
-            } catch (error: Exception) {
+            } catch (error: Throwable) {
                 Log.w(TAG, "status", error)
             }
             handler.postDelayed(this, 1000)
@@ -52,19 +52,34 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
+        Log.d(TAG, "Activity started")
 
-        seed = YggBridge.loadOrCreateSeed(filesDir.resolve("seed.key").absolutePath)
-        address = YggBridge.deriveAddress(seed)
         statusView = findViewById(R.id.status)
-
+        statusView.text = "Starting..."
         val addressView = findViewById<TextView>(R.id.address)
-        addressView.text = "ip:$address"
+        val toggle = findViewById<Button>(R.id.toggle)
+        toggle.isEnabled = false
+
+        try {
+            seed = YggBridge.loadOrCreateSeed(filesDir.resolve("seed.key").absolutePath)
+            address = YggBridge.deriveAddress(seed)
+            addressView.text = "ip:$address"
+            statusView.text = "Off"
+            toggle.isEnabled = true
+            Log.d(TAG, "JNI bridge ready, address derived")
+        } catch (error: Throwable) {
+            Log.e(TAG, "Startup failed", error)
+            statusView.text = "Startup failed: ${error.message ?: error.javaClass.simpleName}"
+            addressView.text = "ip:unavailable"
+            return
+        }
+
         addressView.setOnClickListener {
             val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             clipboard.setPrimaryClip(ClipData.newPlainText("Yggdrasil address", "ip:$address"))
         }
 
-        findViewById<Button>(R.id.toggle).setOnClickListener {
+        toggle.setOnClickListener {
             if (isRunning()) {
                 stopService(vpnIntent(DirectDnsVpnService.ACTION_STOP))
             } else {
@@ -80,7 +95,7 @@ class MainActivity : Activity() {
 
     private fun isRunning(): Boolean = try {
         JSONObject(YggBridge.status()).optBoolean("running", false)
-    } catch (error: Exception) {
+    } catch (error: Throwable) {
         Log.w(TAG, "status", error)
         false
     }
@@ -102,9 +117,20 @@ class MainActivity : Activity() {
     }
 
     private fun prepareVpn(intent: Intent) {
+        Log.d(TAG, "Preparing VPN")
         val preparation = VpnService.prepare(this)
         if (preparation != null) {
+            Log.d(TAG, "VPN permission required")
             startActivityForResult(preparation, REQUEST_VPN)
+        } else {
+            Log.d(TAG, "Starting VPN service")
+            startVpnService(intent)
+        }
+    }
+
+    private fun startVpnService(intent: Intent) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
         } else {
             startService(intent)
         }
@@ -125,7 +151,8 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_VPN && resultCode == RESULT_OK) {
-            startService(vpnIntent(DirectDnsVpnService.ACTION_START))
+            Log.d(TAG, "VPN permission granted")
+            startVpnService(vpnIntent(DirectDnsVpnService.ACTION_START))
         }
     }
 

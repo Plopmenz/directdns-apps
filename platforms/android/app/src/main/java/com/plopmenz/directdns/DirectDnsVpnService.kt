@@ -23,24 +23,47 @@ class DirectDnsVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "VPN service created")
         createChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        Log.d(TAG, "VPN service command: ${intent?.action}")
         when (intent?.action) {
-            ACTION_START -> startVpn()
+            ACTION_START -> {
+                try {
+                    startVpn()
+                } catch (error: Throwable) {
+                    Log.e(TAG, "VPN start failed", error)
+                    stopSelf()
+                }
+            }
+
             ACTION_STOP -> {
-                YggBridge.stop()
+                try {
+                    YggBridge.stop()
+                } catch (error: Throwable) {
+                    Log.e(TAG, "VPN stop failed", error)
+                }
                 stopSelf()
             }
+
+            else -> Log.w(TAG, "Unknown VPN service action: ${intent?.action}")
         }
         return START_NOT_STICKY
     }
 
     private fun startVpn() {
+        // Enter the foreground state before blocking on DNS/JNI setup.
+        enterForeground()
+
+        Log.d(TAG, "Loading Yggdrasil seed")
         val seed = YggBridge.loadOrCreateSeed(filesDir.resolve("seed.key").absolutePath)
         val address = YggBridge.deriveAddress(seed)
+        Log.d(TAG, "Derived Yggdrasil address")
+
         val dnsServers = YggBridge.dnsServers()
+        Log.d(TAG, "Resolved DNS servers: ${dnsServers.joinToString()}")
 
         val builder = Builder()
             .setSession("DirectDNS")
@@ -60,6 +83,14 @@ class DirectDnsVpnService : VpnService() {
                 return
             }
 
+        // Ownership of the raw fd moves into tun-rs; do not close the ParcelFileDescriptor.
+        val tunFd = tunnel.detachFd()
+        Log.d(TAG, "TUN interface established")
+        YggBridge.start(seed, tunFd)
+        Log.i(TAG, "Yggdrasil session started")
+    }
+
+    private fun enterForeground() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
                 NOTIFICATION_ID,
@@ -69,12 +100,14 @@ class DirectDnsVpnService : VpnService() {
         } else {
             startForeground(NOTIFICATION_ID, notification())
         }
-        // Ownership of the raw fd moves into tun-rs; do not close the ParcelFileDescriptor.
-        YggBridge.start(seed, tunnel.detachFd())
     }
 
     override fun onDestroy() {
-        YggBridge.stop()
+        try {
+            YggBridge.stop()
+        } catch (error: Throwable) {
+            Log.e(TAG, "VPN cleanup failed", error)
+        }
         super.onDestroy()
     }
 
