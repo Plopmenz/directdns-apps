@@ -1,9 +1,10 @@
 //! Hardcoded public peer resolution.
 //!
-//! `peer.yggdrasil.openmesh.cloud` resolves to clearnet addresses. Every
-//! resolved address is ICMP-pinged (with a TCP connect fallback) and only the
-//! lowest-RTT address is used as the `tls://<ip>:9003` peer. All resolved IPs
-//! remain plain DNS servers on port 53.
+//! `peer.yggdrasil.openmesh.cloud` resolves to clearnet addresses. DNS results
+//! are returned immediately so a VPN can be established without waiting. Every
+//! resolved address is then ICMP-pinged (with a TCP connect fallback) and only
+//! the lowest-RTT address is used as the `tls://<ip>:9003` peer. All resolved
+//! IPs remain plain DNS servers on port 53.
 
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
@@ -31,30 +32,43 @@ pub struct PeerSet {
     pub dns_servers: Vec<IpAddr>,
 }
 
-/// Resolves the hardcoded peer host and selects the fastest address.
-pub async fn resolve_peers() -> Result<PeerSet, Error> {
-    let mut set = PeerSet::default();
-    let mut seen = Vec::new();
-
-    let addresses = tokio::net::lookup_host((PEER_HOST, PEER_PORT))
+/// Resolves the hardcoded peer host without probing. This is fast enough to
+/// run on a UI or VPN-service thread before the tunnel is established.
+pub async fn resolve_addresses() -> Result<Vec<IpAddr>, Error> {
+    let mut addresses = Vec::new();
+    for socket in tokio::net::lookup_host((PEER_HOST, PEER_PORT))
         .await
-        .map_err(|error| Error(format!("failed to resolve {PEER_HOST}: {error}")))?;
-
-    for socket in addresses {
+        .map_err(|error| Error(format!("failed to resolve {PEER_HOST}: {error}")))?
+    {
         let ip = socket.ip();
-        if seen.contains(&ip) {
-            continue;
+        if !addresses.contains(&ip) {
+            addresses.push(ip);
         }
-        seen.push(ip);
-        set.dns_servers.push(ip);
     }
-
-    if seen.is_empty() {
+    if addresses.is_empty() {
         return Err(Error(format!("{PEER_HOST} did not resolve to any address")));
+    }
+    Ok(addresses)
+}
+
+/// Non-async variant for JNI calls that cannot use a Tokio runtime.
+pub fn resolve_addresses_blocking() -> Result<Vec<IpAddr>, Error> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| Error(format!("cannot start resolver runtime: {error}")))?;
+    runtime.block_on(resolve_addresses())
+}
+
+/// Probes every address concurrently and returns the lowest-RTT one.
+/// Suitable for running in the background after the VPN is already up.
+pub async fn select_fastest(ips: &[IpAddr]) -> Option<IpAddr> {
+    if ips.is_empty() {
+        return None;
     }
 
     let mut probes = JoinSet::new();
-    for ip in seen.iter().copied() {
+    for ip in ips.iter().copied() {
         probes.spawn_blocking(move || (ip, probe_rtt(ip)));
     }
 
@@ -67,14 +81,23 @@ pub async fn resolve_peers() -> Result<PeerSet, Error> {
     }
     results.sort_by(compare_probes);
 
-    let selected = results.first().map_or(seen[0], |(ip, _)| *ip);
+    let selected = results.first().map(|(ip, _)| *ip)?;
     match results.first().and_then(|(_, rtt)| *rtt) {
         Some(rtt) => log::info!("selected Yggdrasil peer {selected} with RTT {rtt:?}"),
         None => log::warn!("all peer probes failed; using first resolved address {selected}"),
     }
+    Some(selected)
+}
 
-    set.uris.push(tls_uri(selected));
-    Ok(set)
+/// Resolves peers and selects the fastest address. Used where no tunnel needs
+/// to be established first (Linux startup and resolver tests).
+pub async fn resolve_peers() -> Result<PeerSet, Error> {
+    let dns_servers = resolve_addresses().await?;
+    let selected = select_fastest(&dns_servers).await.unwrap_or(dns_servers[0]);
+    Ok(PeerSet {
+        uris: vec![tls_uri(selected)],
+        dns_servers,
+    })
 }
 
 /// Resolves peers from a plain (non-async) context, such as a JNI call.
@@ -86,7 +109,7 @@ pub fn resolve_peers_blocking() -> Result<PeerSet, Error> {
     runtime.block_on(resolve_peers())
 }
 
-fn tls_uri(ip: IpAddr) -> String {
+pub(crate) fn tls_uri(ip: IpAddr) -> String {
     format!(
         "tls://{}",
         yggdrasil::core::uri::join_host_port(&ip.to_string(), PEER_PORT)

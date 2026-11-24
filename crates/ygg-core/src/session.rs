@@ -14,7 +14,13 @@ use crate::node::Node;
 use crate::{Error, Status};
 
 enum Command {
-    Stop { reply: oneshot::Sender<()> },
+    Stop {
+        reply: oneshot::Sender<()>,
+    },
+    SetMulticast {
+        enabled: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// A node running on its own Tokio runtime thread.
@@ -58,6 +64,8 @@ impl Session {
                     match Node::start(seed, interface).await {
                         Ok(mut node) => {
                             *lock(&thread_state) = node.status();
+                            // The tunnel is up; RTT probing must not delay startup.
+                            node.spawn_peer_probe();
                             let _ = ready_tx.send(Ok(()));
                             run_loop(&mut node, cmd_rx, thread_state).await;
                         }
@@ -110,6 +118,25 @@ impl Session {
         lock(&self.state).clone()
     }
 
+    /// Enables or disables local-network peer discovery on a running node.
+    pub fn set_multicast(&self, enabled: bool) -> Result<(), Error> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        if self
+            .cmd_tx
+            .send(Command::SetMulticast {
+                enabled,
+                reply: reply_tx,
+            })
+            .is_err()
+        {
+            return Err(Error("runtime thread is not running".into()));
+        }
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| Error("runtime thread dropped multicast reply".into()))?
+            .map_err(Error)
+    }
+
     /// Stops the node and joins its runtime thread.
     pub fn stop(&mut self) -> Result<(), Error> {
         let Some(thread) = self.thread.take() else {
@@ -154,6 +181,10 @@ async fn run_loop(
                     *lock(&state) = node.status();
                     let _ = reply.send(());
                     break;
+                }
+                Some(Command::SetMulticast { enabled, reply }) => {
+                    let result = node.set_multicast(enabled).await.map_err(|error| error.0);
+                    let _ = reply.send(result);
                 }
                 None => {
                     node.stop();

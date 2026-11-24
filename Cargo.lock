@@ -5755,6 +5755,7 @@ dependencies = [
  "dirs",
  "getrandom 0.4.3",
  "log",
+ "regex",
  "serde",
  "serde_json",
  "socket2",

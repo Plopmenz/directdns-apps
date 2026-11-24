@@ -7,6 +7,7 @@ use ygg_core::{InterfaceSource, Seed, Session, Status};
 struct LinuxPlatform {
     seed: Option<Seed>,
     session: Option<Session>,
+    lan: bool,
 }
 
 impl LinuxPlatform {
@@ -14,6 +15,7 @@ impl LinuxPlatform {
         Self {
             seed: None,
             session: None,
+            lan: false,
         }
     }
 }
@@ -49,7 +51,27 @@ impl Platform for LinuxPlatform {
             .ok_or_else(|| "No private key available".to_string())?;
         let session = Session::start(seed, InterfaceSource::Name("auto".into()))
             .map_err(|error| format!("Failed to connect: {error}"))?;
+        if self.lan
+            && let Err(error) = session.set_multicast(true)
+        {
+            return Err(format!("Failed to enable LAN peers: {error}"));
+        }
         self.session = Some(session);
+        Ok(())
+    }
+
+    fn multicast_enabled(&self) -> bool {
+        self.lan
+    }
+
+    fn toggle_multicast(&mut self) -> Result<(), String> {
+        self.lan = !self.lan;
+        if let Some(session) = &self.session
+            && let Err(error) = session.set_multicast(self.lan)
+        {
+            self.lan = !self.lan;
+            return Err(format!("Failed to toggle LAN peers: {error}"));
+        }
         Ok(())
     }
 

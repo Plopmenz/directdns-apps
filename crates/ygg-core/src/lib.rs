@@ -21,7 +21,10 @@ pub use key::{
     Seed, address_from_seed, default_seed_path, display_address, generate_seed,
     load_or_create_seed, read_seed,
 };
-pub use peers::{PeerSet, resolve_peers, resolve_peers_blocking};
+pub use peers::{
+    PeerSet, resolve_addresses, resolve_addresses_blocking, resolve_peers, resolve_peers_blocking,
+    select_fastest,
+};
 pub use session::Session;
 pub use status::Status;
 pub use yggdrasil::tun::InterfaceSource;

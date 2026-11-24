@@ -10,6 +10,14 @@ class MainActivity : NativeActivity() {
         super.onCreate(savedInstanceState)
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // eframe/winit can only create one event loop per process. Once this
+        // Activity is destroyed the cached process can never render again, so
+        // make the next launch start in a fresh process.
+        Runtime.getRuntime().exit(0)
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,

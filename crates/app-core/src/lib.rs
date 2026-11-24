@@ -30,6 +30,12 @@ pub trait Platform {
     /// asynchronous Android service failures arrive through [`Self::take_errors`].
     fn toggle(&mut self) -> Result<(), String>;
 
+    /// Whether local-network peer discovery is enabled (or requested).
+    fn multicast_enabled(&self) -> bool;
+
+    /// Turns local-network peer discovery on or off.
+    fn toggle_multicast(&mut self) -> Result<(), String>;
+
     /// Copies text using the platform clipboard.
     fn copy_text(&mut self, ctx: &egui::Context, text: &str) -> Result<(), String>;
 
@@ -111,7 +117,7 @@ impl<P: Platform> App<P> {
                 ui.vertical_centered(|ui| {
                     // `centered_and_justified` does not reliably fill the
                     // CentralPanel in eframe 0.37, so center by explicit space.
-                    let content_height = 200.0;
+                    let content_height = 262.0;
                     ui.add_space((ui.available_height() - content_height).max(0.0) / 2.0);
 
                     ui.heading(
@@ -133,7 +139,7 @@ impl<P: Platform> App<P> {
                     .fill(BUTTON_FILL);
                     if ui.add(button).clicked() {
                         match self.platform.toggle() {
-                            Ok(()) => {}
+                            Ok(()) => ctx.request_repaint(),
                             Err(error) => {
                                 self.notify(error, ERROR_NOTICE_DURATION);
                             }
@@ -149,6 +155,18 @@ impl<P: Platform> App<P> {
                             Err(error) => self.notify(error, ERROR_NOTICE_DURATION),
                         }
                     }
+
+                    ui.add_space(12.0);
+                    ui.vertical_centered(|ui| {
+                        let lan = self.platform.multicast_enabled();
+                        if lan_toggle(ui, lan) {
+                            match self.platform.toggle_multicast() {
+                                Ok(()) => ctx.request_repaint(),
+                                Err(error) => self.notify(error, ERROR_NOTICE_DURATION),
+                            }
+                        }
+                        ui.label(RichText::new("LAN").size(12.0).color(Color32::WHITE));
+                    });
                 });
             });
 
@@ -196,6 +214,30 @@ impl<P: Platform> App<P> {
         self.background = mix_color(self.background, target, step);
         ctx.request_repaint();
     }
+}
+
+/// Small drawn toggle: filled circle for on, outline for off.
+fn lan_toggle(ui: &mut egui::Ui, enabled: bool) -> bool {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(52.0, 34.0), egui::Sense::click());
+    let fill = Color32::from_white_alpha(if enabled { 44 } else { 16 });
+    ui.painter().rect_filled(rect, 12.0, fill);
+    if response.hovered() {
+        ui.painter()
+            .rect_filled(rect, 12.0, Color32::from_white_alpha(24));
+    }
+    let center = rect.center();
+    if enabled {
+        ui.painter().circle_filled(center, 8.0, COLOR_CONNECTED);
+    } else {
+        ui.painter().circle_stroke(
+            center,
+            8.0,
+            egui::Stroke::new(2.0, Color32::from_white_alpha(220)),
+        );
+    }
+    response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
 }
 
 /// Draws the address as a subtle clickable chip without adding a visible label.

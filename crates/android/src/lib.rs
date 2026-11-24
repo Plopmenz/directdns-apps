@@ -6,8 +6,6 @@
 
 #[cfg(target_os = "android")]
 use std::path::Path;
-#[cfg(target_os = "android")]
-use std::sync::Arc;
 use std::sync::Mutex;
 #[cfg(target_os = "android")]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,10 +37,34 @@ const SEED_FILE: &str = "seed.key";
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// The UI shows the requested state immediately, before the Java-side VPN
+/// consent flow and session startup have completed.
+#[cfg(target_os = "android")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingAction {
+    Start,
+    Stop,
+}
+
+#[cfg(target_os = "android")]
+static UI_STATE: Mutex<Option<PendingAction>> = Mutex::new(None);
+#[cfg(target_os = "android")]
+static UI_CONTEXT: Mutex<Option<egui::Context>> = Mutex::new(None);
+/// The toggle state the user last requested. `Session::status()` can lag or
+/// report stopped while the Android VPN is still up, so it is not UI truth.
+#[cfg(target_os = "android")]
+static UI_RUNNING: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "android")]
+static PENDING: AtomicBool = AtomicBool::new(false);
+/// LAN preference is kept by the UI and applied whenever a session starts.
+#[cfg(target_os = "android")]
+static UI_LAN: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "android")]
+const SET_MULTICAST_SIGNATURE: &str = "(Landroid/content/Context;Z)V";
+
 #[cfg(target_os = "android")]
 struct AndroidPlatform {
     app: AndroidApp,
-    pending: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "android")]
@@ -57,35 +79,88 @@ impl Platform for AndroidPlatform {
     }
 
     fn status(&self) -> Status {
-        session_status()
+        displayed_status()
     }
 
     fn toggle(&mut self) -> Result<(), String> {
-        if self.pending.swap(true, Ordering::SeqCst) {
+        if PENDING.swap(true, Ordering::SeqCst) {
             return Ok(());
         }
 
+        // Decide from what the user can see, not from the still-changing
+        // session status. Otherwise a tap during startup issues another start.
+        let starting = !displayed_status().running;
+        UI_RUNNING.store(starting, Ordering::SeqCst);
+        set_pending(Some(if starting {
+            PendingAction::Start
+        } else {
+            PendingAction::Stop
+        }));
+
         let app = self.app.clone();
         let call_app = app.clone();
-        let pending = self.pending.clone();
-        let (method, signature) = if self.status().running {
-            ("stopVpn", "(Landroid/content/Context;)V")
-        } else {
+        let (method, signature) = if starting {
             // Kotlin declares requestStart(Activity), not requestStart(Context).
             ("requestStart", "(Landroid/app/Activity;)V")
+        } else {
+            ("stopVpn", "(Landroid/content/Context;)V")
         };
 
         schedule_on_java_main(&app, move || {
-            let result = if method == "requestStart" {
+            let result = if starting {
                 call_platform_activity(&call_app, method, signature)
             } else {
                 call_platform(method, signature)
             };
-            pending.store(false, Ordering::SeqCst);
             if let Err(error) = result {
+                fail_pending(error);
+            }
+        });
+
+        if !starting {
+            // Do not depend solely on VpnService.onDestroy: tear down the Rust
+            // session (and its TUN fd) directly on a background thread.
+            std::thread::spawn(|| {
+                if let Err(error) = stop_session() {
+                    fail_pending(error);
+                } else {
+                    clear_pending();
+                }
+            });
+        }
+        Ok(())
+    }
+
+    fn multicast_enabled(&self) -> bool {
+        UI_LAN.load(Ordering::SeqCst)
+    }
+
+    fn toggle_multicast(&mut self) -> Result<(), String> {
+        let enabled = !UI_LAN.load(Ordering::SeqCst);
+        UI_LAN.store(enabled, Ordering::SeqCst);
+        request_ui_repaint();
+
+        // The Wi-Fi lock must only be held while the tunnel is up.
+        let active = enabled && UI_RUNNING.load(Ordering::SeqCst);
+        let app = self.app.clone();
+        schedule_on_java_main(&app, move || {
+            if let Err(error) = call_platform_bool("setMulticast", SET_MULTICAST_SIGNATURE, active)
+            {
                 push_error(error);
             }
         });
+
+        if UI_RUNNING.load(Ordering::SeqCst) {
+            let session = match SESSION.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(session) = session.as_ref()
+                && let Err(error) = session.set_multicast(enabled)
+            {
+                push_error(format!("Cannot toggle LAN peers: {error}"));
+            }
+        }
         Ok(())
     }
 
@@ -131,12 +206,9 @@ impl eframe::App for Runner {
 #[cfg(target_os = "android")]
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
-    let pending = Arc::new(AtomicBool::new(false));
+    UI_RUNNING.store(session_status().running, Ordering::SeqCst);
     let runner = Runner {
-        app: App::new(AndroidPlatform {
-            app: app.clone(),
-            pending,
-        }),
+        app: App::new(AndroidPlatform { app: app.clone() }),
     };
     let options = eframe::NativeOptions {
         android_app: Some(app),
@@ -146,7 +218,14 @@ fn android_main(app: AndroidApp) {
     let _ = eframe::run_native(
         "DirectDNS",
         options,
-        Box::new(move |_ctx| Ok(Box::new(runner) as Box<dyn eframe::App>)),
+        Box::new(move |creation| {
+            let context = creation.egui_ctx.clone();
+            match UI_CONTEXT.lock() {
+                Ok(mut stored) => *stored = Some(context),
+                Err(poisoned) => *poisoned.into_inner() = Some(context),
+            }
+            Ok(Box::new(runner) as Box<dyn eframe::App>)
+        }),
     );
 }
 
@@ -159,6 +238,86 @@ fn session_status() -> Status {
         .as_ref()
         .map(Session::status)
         .unwrap_or_else(Status::default)
+}
+
+#[cfg(target_os = "android")]
+fn request_ui_repaint() {
+    let context = match UI_CONTEXT.lock() {
+        Ok(context) => context.clone(),
+        Err(poisoned) => poisoned.into_inner().clone(),
+    };
+    if let Some(context) = context {
+        context.request_repaint();
+    }
+}
+
+#[cfg(target_os = "android")]
+fn set_pending(action: Option<PendingAction>) {
+    match UI_STATE.lock() {
+        Ok(mut state) => *state = action,
+        Err(poisoned) => *poisoned.into_inner() = action,
+    }
+    request_ui_repaint();
+}
+
+#[cfg(target_os = "android")]
+fn clear_pending() {
+    PENDING.store(false, Ordering::SeqCst);
+    set_pending(None);
+}
+
+#[cfg(not(target_os = "android"))]
+fn clear_pending() {}
+
+#[cfg(target_os = "android")]
+fn fail_pending(error: impl Into<String>) {
+    UI_RUNNING.store(false, Ordering::SeqCst);
+    clear_pending();
+    push_error(error);
+}
+
+#[cfg(not(target_os = "android"))]
+fn fail_pending(error: impl Into<String>) {
+    push_error(error);
+}
+
+#[cfg(target_os = "android")]
+fn displayed_status() -> Status {
+    let action = match UI_STATE.lock() {
+        Ok(state) => *state,
+        Err(poisoned) => *poisoned.into_inner(),
+    };
+    let requested = match action {
+        Some(PendingAction::Start) => Some(true),
+        Some(PendingAction::Stop) => Some(false),
+        None => None,
+    };
+    let running = requested.unwrap_or_else(|| UI_RUNNING.load(Ordering::SeqCst));
+    let status = session_status();
+    Status {
+        running,
+        message: status.message,
+        address: status.address,
+        peers_up: if running { status.peers_up } else { 0 },
+        peers_total: if running { status.peers_total } else { 0 },
+        dns_servers: status.dns_servers,
+    }
+}
+
+fn stop_session() -> Result<(), String> {
+    let session = match SESSION.lock() {
+        Ok(mut guard) => guard.take(),
+        Err(poisoned) => poisoned.into_inner().take(),
+    };
+    let result = match session {
+        Some(mut session) => session.stop().map_err(|error| error.0),
+        None => Ok(()),
+    };
+    #[cfg(target_os = "android")]
+    if let Err(error) = call_platform_bool("setMulticast", SET_MULTICAST_SIGNATURE, false) {
+        push_error(error);
+    }
+    result
 }
 
 fn push_error(message: impl Into<String>) {
@@ -317,6 +476,22 @@ fn call_platform_string(method: &str, signature: &str, value: &str) -> Result<()
 }
 
 #[cfg(target_os = "android")]
+fn call_platform_bool(method: &str, signature: &str, value: bool) -> Result<(), String> {
+    with_env(|env| {
+        let class = find_platform_class(env)?;
+        let context = android_context();
+        env.call_static_method(
+            class,
+            method,
+            signature,
+            &[JValue::Object(&context), JValue::Bool(value as jboolean)],
+        )
+        .map_err(|error| format!("{method} failed: {error}"))?;
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "android")]
 fn java_files_dir() -> Result<String, String> {
     with_env(|env| {
         let class = find_platform_class(env)?;
@@ -357,7 +532,7 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_onError<'local>(
         .get_string(&message)
         .map(String::from)
         .unwrap_or_else(|_| "Unknown Android error".into());
-    push_error(message);
+    fail_pending(message);
 }
 
 #[cfg(target_os = "android")]
@@ -370,11 +545,11 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_onNotificationPermi
     granted: jboolean,
 ) {
     if granted == 0 {
-        push_error("Notifications permission is required to run the VPN");
+        fail_pending("Notifications permission is required to run the VPN");
         return;
     }
     if let Err(error) = call_platform("startVpn", "(Landroid/content/Context;)V") {
-        push_error(error);
+        fail_pending(error);
     }
 }
 
@@ -386,11 +561,11 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_onVpnPermissionResu
     granted: jboolean,
 ) {
     if granted == 0 {
-        push_error("VPN permission was not granted");
+        fail_pending("VPN permission was not granted");
         return;
     }
     if let Err(error) = call_platform("startVpn", "(Landroid/content/Context;)V") {
-        push_error(error);
+        fail_pending(error);
     }
 }
 
@@ -443,14 +618,15 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_dnsServers<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) -> jobjectArray {
-    let set = match ygg_core::resolve_peers_blocking() {
-        Ok(set) => set,
+    // DNS only: RTT probing runs after the VPN is established.
+    let servers = match ygg_core::resolve_addresses_blocking() {
+        Ok(servers) => servers,
         Err(error) => {
             throw(&mut env, error.0);
             return JObject::null().into_raw();
         }
     };
-    let len = set.dns_servers.len() as jsize;
+    let len = servers.len() as jsize;
     let array = match env.new_object_array(len, "java/lang/String", JObject::null()) {
         Ok(array) => array,
         Err(error) => {
@@ -458,7 +634,7 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_dnsServers<'local>(
             return JObject::null().into_raw();
         }
     };
-    for (index, ip) in set.dns_servers.iter().enumerate() {
+    for (index, ip) in servers.iter().enumerate() {
         let value = match env.new_string(ip.to_string()) {
             Ok(value) => value,
             Err(error) => {
@@ -487,7 +663,8 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_start<'local>(
     let seed = match java_seed(&env, &seed) {
         Ok(seed) => seed,
         Err(error) => {
-            throw(&mut env, error);
+            fail_pending(error);
+            throw(&mut env, "invalid seed");
             return;
         }
     };
@@ -496,12 +673,37 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_start<'local>(
         Err(poisoned) => poisoned.into_inner(),
     };
     if session.is_some() {
+        fail_pending("session already running");
         throw(&mut env, "session already running");
         return;
     }
     match Session::start(seed, InterfaceSource::FileDescriptor(tun_fd)) {
-        Ok(started) => *session = Some(started),
-        Err(error) => throw(&mut env, error.0),
+        Ok(started) => {
+            #[cfg(target_os = "android")]
+            {
+                if UI_LAN.load(Ordering::SeqCst) {
+                    match call_platform_bool("setMulticast", SET_MULTICAST_SIGNATURE, true) {
+                        Ok(()) => {
+                            if let Err(error) = started.set_multicast(true) {
+                                push_error(format!("Cannot enable LAN peers: {error}"));
+                                let _ = call_platform_bool(
+                                    "setMulticast",
+                                    SET_MULTICAST_SIGNATURE,
+                                    false,
+                                );
+                            }
+                        }
+                        Err(error) => push_error(error),
+                    }
+                }
+            }
+            *session = Some(started);
+            clear_pending();
+        }
+        Err(error) => {
+            fail_pending(error.0.clone());
+            throw(&mut env, error.0);
+        }
     }
 }
 
@@ -510,14 +712,12 @@ pub extern "system" fn Java_com_plopmenz_directdns_YggBridge_stop<'local>(
     mut env: JNIEnv<'local>,
     _class: JClass<'local>,
 ) {
-    let mut session = match SESSION.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    if let Some(mut started) = session.take()
-        && let Err(error) = started.stop()
-    {
-        throw(&mut env, error.0);
+    match stop_session() {
+        Ok(()) => clear_pending(),
+        Err(error) => {
+            fail_pending(error.clone());
+            throw(&mut env, error);
+        }
     }
 }
 

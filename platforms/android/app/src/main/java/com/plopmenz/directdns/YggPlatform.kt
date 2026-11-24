@@ -8,12 +8,15 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
+import android.net.wifi.WifiManager
 import android.os.Build
 
 /** Android-only capabilities the shared Rust UI cannot access itself. */
 object YggPlatform {
     const val REQUEST_VPN = 42
     const val REQUEST_NOTIFICATIONS = 43
+
+    private var multicastLock: WifiManager.MulticastLock? = null
 
     @JvmStatic
     fun filesDir(context: Context): String = context.filesDir.absolutePath
@@ -48,10 +51,26 @@ object YggPlatform {
 
     @JvmStatic
     fun stopVpn(context: Context) {
-        val intent = Intent(context, DirectDnsVpnService::class.java).apply {
-            action = DirectDnsVpnService.ACTION_STOP
+        // Match by component only; the Rust session is torn down directly by
+        // the UI so this only needs to shut the Android service down.
+        context.stopService(Intent(context, DirectDnsVpnService::class.java))
+    }
+
+    /** Keeps the Wi-Fi radio able to receive local multicast while LAN peers are on. */
+    @JvmStatic
+    @Synchronized
+    fun setMulticast(context: Context, enabled: Boolean) {
+        if (!enabled) {
+            multicastLock?.let { if (it.isHeld) it.release() }
+            multicastLock = null
+            return
         }
-        context.stopService(intent)
+        if (multicastLock != null) return
+        val wifi = context.applicationContext.getSystemService(WifiManager::class.java) ?: return
+        multicastLock = wifi.createMulticastLock("DirectDNS").apply {
+            setReferenceCounted(true)
+            acquire()
+        }
     }
 
     @JvmStatic
