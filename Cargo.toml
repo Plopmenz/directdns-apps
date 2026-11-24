@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/ygg-core", "crates/app-ui", "crates/android"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "MIT"
+authors = ["Plopmenz"]
+repository = "https://github.com/Plopmenz/directdns-android"
+
+[workspace.dependencies]
+ygg-core = { path = "crates/ygg-core" }
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "sync",
+    "time",
+    "process",
+    "fs",
+    "io-util",
+] }

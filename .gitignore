@@ -1,0 +1,11 @@
+/target/
+*.log
+.DS_Store
+/local/
+/platforms/android/.gradle/
+/platforms/android/app/build/
+/platforms/android/app/src/main/jniLibs/
+/platforms/android/local.properties
+/result
+/result-*
+/keys/
