@@ -26,7 +26,7 @@ use jni::sys::{jint, jobjectArray, jsize, jstring};
 use ygg_core::{InterfaceSource, Session, Status};
 
 #[cfg(target_os = "android")]
-const PLATFORM_CLASS: &str = "com/plopmenz/directdns/YggPlatform";
+const PLATFORM_CLASS: &str = "com.plopmenz.directdns.YggPlatform";
 
 static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -144,9 +144,15 @@ fn with_env<R>(action: impl FnOnce(&mut JNIEnv<'_>) -> Result<R, String>) -> Res
             .attach_current_thread_permanently()
             .map_err(|error| format!("cannot attach JNI thread: {error}"))?,
     };
-    let result = action(&mut env)?;
-    check_exception(&mut env)?;
-    Ok(result)
+    let result = action(&mut env);
+    let exception = check_exception(&mut env);
+    match result {
+        Ok(value) => {
+            exception?;
+            Ok(value)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -168,12 +174,36 @@ fn android_context<'local>() -> JObject<'local> {
     unsafe { JObject::from_raw(ptr) }
 }
 
+/// `FindClass` from the NativeActivity thread only sees the system class loader.
+/// Loading through the app `Context` class loader makes our Kotlin classes visible.
+#[cfg(target_os = "android")]
+fn find_platform_class<'local>(env: &mut JNIEnv<'local>) -> Result<JClass<'local>, String> {
+    let context = android_context();
+    let loader = env
+        .call_method(context, "getClassLoader", "()Ljava/lang/ClassLoader;", &[])
+        .map_err(|error| format!("getClassLoader failed: {error}"))?
+        .l()
+        .map_err(|error| format!("getClassLoader returned a non-object: {error}"))?;
+    let name = env
+        .new_string(PLATFORM_CLASS)
+        .map_err(|error| format!("cannot allocate platform class name: {error}"))?;
+    let class = env
+        .call_method(
+            loader,
+            "loadClass",
+            "(Ljava/lang/String;)Ljava/lang/Class;",
+            &[JValue::Object(&JObject::from(name))],
+        )
+        .map_err(|error| format!("cannot load {PLATFORM_CLASS}: {error}"))?
+        .l()
+        .map_err(|error| format!("loadClass returned a non-class: {error}"))?;
+    Ok(JClass::from(class))
+}
+
 #[cfg(target_os = "android")]
 fn call_platform(method: &str, signature: &str) -> Result<(), String> {
     with_env(|env| {
-        let class = env
-            .find_class(PLATFORM_CLASS)
-            .map_err(|error| format!("cannot find {PLATFORM_CLASS}: {error}"))?;
+        let class = find_platform_class(env)?;
         let context = android_context();
         env.call_static_method(class, method, signature, &[JValue::Object(&context)])
             .map_err(|error| format!("{method} failed: {error}"))?;
@@ -184,9 +214,7 @@ fn call_platform(method: &str, signature: &str) -> Result<(), String> {
 #[cfg(target_os = "android")]
 fn call_platform_string(method: &str, signature: &str, value: &str) -> Result<(), String> {
     with_env(|env| {
-        let class = env
-            .find_class(PLATFORM_CLASS)
-            .map_err(|error| format!("cannot find {PLATFORM_CLASS}: {error}"))?;
+        let class = find_platform_class(env)?;
         let context = android_context();
         let value = JObject::from(
             env.new_string(value)
@@ -206,9 +234,7 @@ fn call_platform_string(method: &str, signature: &str, value: &str) -> Result<()
 #[cfg(target_os = "android")]
 fn java_files_dir() -> Result<String, String> {
     with_env(|env| {
-        let class = env
-            .find_class(PLATFORM_CLASS)
-            .map_err(|error| format!("cannot find {PLATFORM_CLASS}: {error}"))?;
+        let class = find_platform_class(env)?;
         let context = android_context();
         let value = env
             .call_static_method(

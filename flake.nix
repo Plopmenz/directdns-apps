@@ -205,6 +205,12 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out
+
+              # Keep exported JNI/android_main symbols, but drop the large
+              # symtab/strtab data that is useless at runtime.
+              STRIP="${androidSdkPath}/ndk-bundle/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+              find jniLibs -type f -name '*.so' -exec "$STRIP" --strip-unneeded {} +
+
               cp -r jniLibs $out/jniLibs
               runHook postInstall
             '';
