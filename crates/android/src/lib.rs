@@ -7,6 +7,8 @@
 #[cfg(target_os = "android")]
 use std::path::Path;
 use std::sync::Mutex;
+#[cfg(target_os = "android")]
+use std::sync::mpsc;
 
 #[cfg(target_os = "android")]
 use android_activity::AndroidApp;
@@ -36,12 +38,14 @@ static SESSION: Mutex<Option<Session>> = Mutex::new(None);
 static ERRORS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 #[cfg(target_os = "android")]
-struct AndroidPlatform;
+struct AndroidPlatform {
+    app: AndroidApp,
+}
 
 #[cfg(target_os = "android")]
 impl Platform for AndroidPlatform {
     fn initialize(&mut self) -> Result<String, String> {
-        let seed_path = Path::new(&java_files_dir()?).join(SEED_FILE);
+        let seed_path = Path::new(&java_files_dir_on_main(&self.app)?).join(SEED_FILE);
         let seed = ygg_core::load_or_create_seed(seed_path)
             .map_err(|error| format!("Cannot load key: {error}"))?;
         Ok(ygg_core::address_from_seed(&seed))
@@ -53,15 +57,16 @@ impl Platform for AndroidPlatform {
 
     fn toggle(&mut self) -> Result<(), String> {
         if self.status().running {
-            call_platform("stopVpn", "(Landroid/content/Context;)V")
+            call_platform_on_main(&self.app, "stopVpn", "(Landroid/content/Context;)V")
         } else {
             // Kotlin declares requestStart(Activity), not requestStart(Context).
-            call_platform("requestStart", "(Landroid/app/Activity;)V")
+            call_platform_on_main(&self.app, "requestStart", "(Landroid/app/Activity;)V")
         }
     }
 
     fn copy_text(&mut self, _ctx: &egui::Context, text: &str) -> Result<(), String> {
-        call_platform_string(
+        call_platform_string_on_main(
+            &self.app,
             "copyToClipboard",
             "(Landroid/content/Context;Ljava/lang/String;)V",
             text,
@@ -96,7 +101,7 @@ impl eframe::App for Runner {
 #[unsafe(no_mangle)]
 fn android_main(app: AndroidApp) {
     let runner = Runner {
-        app: App::new(AndroidPlatform),
+        app: App::new(AndroidPlatform { app: app.clone() }),
     };
     let options = eframe::NativeOptions {
         android_app: Some(app),
@@ -165,9 +170,28 @@ fn check_exception(env: &mut JNIEnv<'_>) -> Result<(), String> {
         .exception_check()
         .map_err(|error| format!("cannot check Java exception: {error}"))?
     {
+        let throwable = env
+            .exception_occurred()
+            .map_err(|error| format!("cannot read Java exception: {error}"))?;
         let _ = env.exception_describe();
         let _ = env.exception_clear();
-        return Err("Java call failed".into());
+
+        let detail = env
+            .call_method(throwable, "toString", "()Ljava/lang/String;", &[])
+            .and_then(|value| value.l())
+            .ok()
+            .and_then(|value| {
+                let value = JString::from(value);
+                env.get_string(&value).ok().map(String::from)
+            })
+            .unwrap_or_else(|| "unknown Java exception".into());
+        let _ = env.exception_check().and_then(|pending| {
+            if pending {
+                env.exception_clear()?;
+            }
+            Ok(())
+        });
+        return Err(format!("Java call failed: {detail}"));
     }
     Ok(())
 }
@@ -255,6 +279,51 @@ fn java_files_dir() -> Result<String, String> {
             .map_err(|error| format!("cannot read filesDir: {error}"))?
             .into())
     })
+}
+
+/// Runs a JNI helper on Android's main thread and waits for its result.
+#[cfg(target_os = "android")]
+fn run_on_java_main<R>(
+    app: &AndroidApp,
+    action: impl FnOnce() -> Result<R, String> + Send + 'static,
+) -> Result<R, String>
+where
+    R: Send + 'static,
+{
+    let (sender, receiver) = mpsc::channel();
+    app.run_on_java_main_thread(Box::new(move || {
+        let _ = sender.send(action());
+    }));
+    receiver
+        .recv()
+        .map_err(|_| "Android main thread is unavailable".to_string())?
+}
+
+#[cfg(target_os = "android")]
+fn call_platform_on_main(app: &AndroidApp, method: &str, signature: &str) -> Result<(), String> {
+    let method = method.to_string();
+    let signature = signature.to_string();
+    run_on_java_main(app, move || call_platform(&method, &signature))
+}
+
+#[cfg(target_os = "android")]
+fn call_platform_string_on_main(
+    app: &AndroidApp,
+    method: &str,
+    signature: &str,
+    value: &str,
+) -> Result<(), String> {
+    let method = method.to_string();
+    let signature = signature.to_string();
+    let value = value.to_string();
+    run_on_java_main(app, move || {
+        call_platform_string(&method, &signature, &value)
+    })
+}
+
+#[cfg(target_os = "android")]
+fn java_files_dir_on_main(app: &AndroidApp) -> Result<String, String> {
+    run_on_java_main(app, java_files_dir)
 }
 
 // --- JNI methods called by Kotlin -------------------------------------------------
